@@ -47,13 +47,14 @@ class CSRFMiddleware:
     def __init__(
         self,
         app: ASGI3Application,
-        allowed_hosts: t.Sequence[str] = [],
+        allowed_hosts: list[str] | tuple[str] = (),  # prefer tuple
         cookie_name: str = DEFAULT_COOKIE_NAME,
         header_name: str = DEFAULT_HEADER_NAME,
         max_age: int = ONE_YEAR,
         allow_header_param: bool = True,
         allow_form_param: bool = False,
-        **kwargs,
+        exempt_urls_for_get: list[str] | tuple[str] = (),  # prefer tuple
+        ** kwargs,
     ):
         """
         :param app:
@@ -75,12 +76,22 @@ class CSRFMiddleware:
         :param allow_form_param:
             Whether to look for the CSRF token in a form field with the same
             name as the cookie. By default, it's not enabled.
+        :param exempt_urls_for_get:
+            The URLs that won't trigger the set-cookie for the csrftoken can
+            be particularly useful for handling the GET requests within the
+            formview, especially for sessions making their first request
+            to the host.
 
         """
-        if not isinstance(allowed_hosts, Sequence):
+        if not isinstance(allowed_hosts, (list, tuple)):
             raise ValueError(
-                "allowed_hosts must be a sequence (list or tuple)"
+                "allowed_hosts must be a list or tuple"
             )
+        if not isinstance(exempt_urls_for_get, (list, tuple)):
+            raise ValueError(
+                "exempt_urls_for_get must be a list or tuple"
+            )
+
         self.app = app
         self.allowed_hosts = allowed_hosts
         self.cookie_name = cookie_name
@@ -88,6 +99,7 @@ class CSRFMiddleware:
         self.max_age = max_age
         self.allow_header_param = allow_header_param
         self.allow_form_param = allow_form_param
+        self.exempt_urls_for_get = exempt_urls_for_get
 
     def is_valid_referer(self, request: Request) -> bool:
         header: str = (
@@ -139,7 +151,7 @@ class CSRFMiddleware:
         headers = MutableHeaders(scope=scope)
         cookie_name = self.cookie_name
 
-        if scope["method"] in SAFE_HTTP_METHODS:
+        if request.method in SAFE_HTTP_METHODS:
             token = request.cookies.get(cookie_name)
             token_required = token is None
 
@@ -152,8 +164,14 @@ class CSRFMiddleware:
             })
 
             async def inner_send(message: ASGISendEvent):
+                """
+                `and scope["path"] not in self.exempt_urls_for_get` will handle
+                the case where the first request from the user is to the urls
+                of formview. In this case, the cookie should be set by the
+                formview directly.
+                """
                 if message["type"] == "http.response.start":
-                    if token_required and token:
+                    if token_required and token and scope["path"] not in self.exempt_urls_for_get:
                         _headers = MutableHeaders(scope=message)
                         cookie: http.cookies.BaseCookie = http.cookies.SimpleCookie()
                         cookie[cookie_name] = token
@@ -161,7 +179,6 @@ class CSRFMiddleware:
                         _headers.append(
                             "set-cookie", cookie.output(header="").strip())
                 await send(message)
-
             await self.app(scope, receive, inner_send)
             return
         else:
