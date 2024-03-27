@@ -18,7 +18,7 @@ Here are some general procedures for transforming the middleware:
 
 7. Finally, remember to call `self.app` with `scope, receive, send`, `await` it, and then forcefully `return`.
 
-8. If you're open to adding the dependency, [asgiref](https://github.com/django/asgiref/) provides some useful type annotations
+8. If you're open to adding the dependency, [asgiref](https://github.com/django/asgiref/) provides some useful type annotations.
 
 ## References
 * [piccolo-api](https://piccolo-api.readthedocs.io/en/latest/)
