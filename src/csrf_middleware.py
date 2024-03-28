@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import http
 import http.cookies
-import re
 import typing as t
 import uuid
-from collections.abc import Sequence
 
 from asgiref.typing import (
     ASGI3Application,
@@ -22,6 +20,17 @@ SAFE_HTTP_METHODS = ("GET", "HEAD", "OPTIONS", "TRACE")
 ONE_YEAR = 31536000  # 365 * 24 * 60 * 60
 DEFAULT_COOKIE_NAME = "csrftoken"
 DEFAULT_HEADER_NAME = "X-CSRFToken"
+
+
+def extend_scope(scope: t.Dict, extra: t.Dict) -> t.Dict:
+    """
+    We copy the scope and extend it with `extra`. It's best to copy the scope
+    rather than manipulate it directly.
+    The function is borrowed from <piccolo_api/jwt_auth/middleware.py>
+    """
+    new_scope = dict(scope)
+    new_scope.update(extra)
+    return new_scope
 
 
 class CSRFMiddleware:
@@ -114,41 +123,12 @@ class CSRFMiddleware:
     def _get_error_response(self, content: str, status_code: http.HTTPStatus) -> Response:
         return Response(content=content, status_code=status_code)
 
-    async def _extract_message(self, receive: ASGIReceiveCallable) -> ASGISendEvent:
-        """
-        Buffering in memory helps avoid the 400 response ("There was an error parsing the body").
-        <https://github.com/florimondmanca/msgpack-asgi/issues/11#issuecomment-1801288070>
-        """
-        body = b''
-        more_body = True
-        while more_body:
-            message = await receive()
-            body += message.get('body', b'')
-            more_body = message.get('more_body', False)
-        message["body"] = body
-        message["more_body"] = False
-        return message
-
-    def _get_form_token(self, message: ASGISendEvent) -> str:
-        """
-        This approach is sub-optimal; ideally, there should be a 
-        data structure to handle this, but I haven't found one yet.
-        """
-        body = message["body"].decode("utf8")
-        cookie_name = self.cookie_name
-        re_csrftoken = re.compile(rf'{cookie_name}=(.*)')
-        if match := re_csrftoken.search(body):
-            return match.group(1)
-        re_csrftoken2 = re.compile(rf'name="{cookie_name}"\r\n\r\n(.*?)\r\n')
-        if match := re_csrftoken2.search(body):
-            return match.group(1)
-
     async def __call__(self, scope: HTTPScope, receive: ASGIReceiveCallable, send: ASGISendCallable):
         if scope["type"] != "http":  # pragma: no cover
             await self.app(scope, receive, send)
             return
 
-        request = Request(scope)
+        request = Request(scope, receive)
         headers = MutableHeaders(scope=scope)
         cookie_name = self.cookie_name
 
@@ -173,11 +153,11 @@ class CSRFMiddleware:
                 """
                 if message["type"] == "http.response.start":
                     if token_required and token and scope["path"] not in self.exempt_urls_for_get:
-                        _headers = MutableHeaders(scope=message)
+                        message_headers = MutableHeaders(scope=message)
                         cookie: http.cookies.BaseCookie = http.cookies.SimpleCookie()
                         cookie[cookie_name] = token
                         cookie[cookie_name]["max-age"] = self.max_age
-                        _headers.append(
+                        message_headers.append(
                             "set-cookie", cookie.output(header="").strip())
                 await send(message)
             await self.app(scope, receive, inner_send)
@@ -191,15 +171,20 @@ class CSRFMiddleware:
                 await response(scope, receive, send)
                 return
 
-            header_token = None
+            header_token, form_token, extended_scope = None, None, None
+            message = {'type': 'http.request',
+                       "body": b'',
+                       'more_body': False}
+
             if self.allow_header_param:
                 header_token = request.headers.get(self.header_name)
 
-            form_token = None
             if self.allow_form_param and not header_token:
-                message = await self._extract_message(receive)
-                form_token = self._get_form_token(message)
-                # should include `form_data` in the `scope`?
+                message.update({"body": await request.body()})
+                form_data = dict(await request.form())
+                form_token = form_data.get(cookie_name)
+                # should do this?
+                extended_scope = extend_scope(scope, form_data)
 
             if not header_token and not form_token:
                 response = self._get_error_response(
@@ -245,5 +230,5 @@ class CSRFMiddleware:
             async def inner_receive():
                 return message
 
-            await self.app(scope, inner_receive, send)
+            await self.app(extended_scope or scope, inner_receive, send)
             return
