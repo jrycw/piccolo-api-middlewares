@@ -135,10 +135,11 @@ class CSRFMiddleware:
         data structure to handle this, but I haven't found one yet.
         """
         body = message["body"].decode("utf8")
-        re_csrftoken = re.compile(r'csrftoken=(.*)')
+        cookie_name = self.cookie_name
+        re_csrftoken = re.compile(rf'{cookie_name}=(.*)')
         if match := re_csrftoken.search(body):
             return match.group(1)
-        re_csrftoken2 = re.compile(r'name="csrftoken"\r\n\r\n(.*?)\r\n')
+        re_csrftoken2 = re.compile(rf'name="{cookie_name}"\r\n\r\n(.*?)\r\n')
         if match := re_csrftoken2.search(body):
             return match.group(1)
 
@@ -198,6 +199,7 @@ class CSRFMiddleware:
             if self.allow_form_param and not header_token:
                 message = await self._extract_message(receive)
                 form_token = self._get_form_token(message)
+                # should include `form_data` in the `scope`?
 
             if not header_token and not form_token:
                 response = self._get_error_response(
